@@ -5,11 +5,11 @@ import json
 import re
 from openai import OpenAI
 import os
-from dotenv import load_dotenv
+
 import instructor
 from pydantic import BaseModel, Field
 
-load_dotenv()
+
 
 app = FastAPI()
 
