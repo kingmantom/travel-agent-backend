@@ -137,8 +137,10 @@ async def ask_route(request: Request):
 
         final_prompt = (
             f"המשתמש מחפש מסלול. הנה כמה הצעות:\n{suggestions}\n"
-            "בחר את המומלץ ביותר והסבר למה."
-        )
+              "בחר את המומלץ ביותר והסבר למה. "
+               "אנא הקף את שם המסלול שאתה ממליץ עליו במרכאות כפולות \"\" כדי שיהיה ניתן לזהות אותו בקלות."
+         )
+
 
         final_response = client.chat.completions.create(
             model=MODEL,
