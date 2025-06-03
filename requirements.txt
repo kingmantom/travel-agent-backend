@@ -5,3 +5,4 @@ instructor
 pandas
 openai
 openpyxl
+scikit-learn
