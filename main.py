@@ -1,12 +1,11 @@
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 import pandas as pd
-import json
 import os
 from dotenv import load_dotenv
 from pydantic import BaseModel, Field
 from openai import OpenAI
-from difflib import SequenceMatcher, get_close_matches
+from difflib import get_close_matches
 import instructor
 from sklearn.cluster import KMeans
 from sklearn.preprocessing import LabelEncoder
@@ -56,9 +55,8 @@ class TripDetails(BaseModel):
     difficulty: str = Field(description="קושי. אחד מ: קל,בינוני,קשה")
     has_water: bool
 
-class ExtraFilter(BaseModel):
-    wants_accessibility: bool = Field(description="האם המשתמש רוצה שהמסלול יהיה נגיש?")
-    max_length_km: float = Field(description="אורך מקסימלי של המסלול בקילומטרים", default=0.0)
+class AccessibilityOnly(BaseModel):
+    wants_accessibility: bool
 
 def levenshtein_distance(s1, s2):
     if len(s1) < len(s2):
@@ -88,59 +86,45 @@ async def ask_route(request: Request):
     context = data.get("context", {})
 
     if is_similar_to_greeting(user_question):
-        return {"response": "שלום! אני כאן כדי לעזור לך למצוא מסלולי טיול בישראל 🏝️ שאל אותי על אזור, קושי, מים או כל דבר שקשור לטיולים."}
+        return {"response": "שלום! אני כאן כדי לעזור לך למצוא מסלולי טיול בישראל 🎕️ שאל אותי על אזור, קושי, מים או כל דבר שקשור לטיולים."}
 
     if context.get("followup_required"):
         followup_answer = client.chat.completions.create(
             model=MODEL,
             messages=[
-                {
-                    "role": "system",
-                    "content": (
-                        "משתמש נשאל האם חשובה לו נגישות לנכים ואורך מקסימלי של המסלול. "
-                        "החזר JSON עם שני שדות: wants_accessibility (true/false), max_length_km (מספר). "
-                        "אם לא חשוב לו – החזר false ו־0 בהתאמה."
-                    )
-                },
-                {"role": "user", "content": user_question}
+                {"role": "system", "content": "משתמש נשאל האם חשובה לו נגישות לנכים. החזר JSON עם שדה wants_accessibility בלבד."},
+                {"role": "user", "content": user_question},
             ],
-            response_model=ExtraFilter
+            response_model=AccessibilityOnly
         )
 
-        trip_details = TripDetails(
-            related=True,
-            region=context.get("region"),
-            difficulty=context.get("difficulty"),
-            has_water=context.get("has_water")
-        )
-        extra_filters = followup_answer
+        region = context.get("region")
+        difficulty = context.get("difficulty")
+        has_water = context.get("has_water")
 
         filtered = df.copy()
-        if trip_details.region:
-            filtered = filtered[filtered["region"] == trip_details.region]
-        if isinstance(trip_details.has_water, bool):
-            filtered = filtered[filtered["has_water"] == trip_details.has_water]
-        if trip_details.difficulty:
-            filtered = filtered[filtered["difficulty"] == trip_details.difficulty]
-        if extra_filters.wants_accessibility:
+        if region:
+            filtered = filtered[filtered["region"] == region]
+        if isinstance(has_water, bool):
+            filtered = filtered[filtered["has_water"] == has_water]
+        if difficulty:
+            filtered = filtered[filtered["difficulty"] == difficulty]
+        if followup_answer.wants_accessibility:
             filtered = filtered[filtered["נגישות"].astype(str).str.contains("נגיש", na=False)]
-        if extra_filters.max_length_km > 0:
-            filtered = filtered[pd.to_numeric(filtered["אורך מסלול (ק\"מ)"], errors="coerce") <= extra_filters.max_length_km]
 
         if filtered.empty:
             return {"response": "לא מצאתי מסלול מתאים לפי הבקשה. אולי תנסה לשנות משהו?"}
 
         suggestions = "\n".join([
-            f"{row['name']} – {row['תיאור קצר']} ({row['region']}, {row['difficulty']})"
+            f'{row["name"]} – {row["תיאור קצר"]} ({row["region"]}, {row["difficulty"]})'
             for _, row in filtered.head(3).iterrows()
         ])
 
+        # בחר אחד והקף אותו במרכאות כדי לאפשר הצגת כפתור דמיון
         final_prompt = (
             f"המשתמש מחפש מסלול. הנה כמה הצעות:\n{suggestions}\n"
-              "בחר את המומלץ ביותר והסבר למה. "
-               "אנא הקף את שם המסלול שאתה ממליץ עליו במרכאות כפולות \"\" כדי שיהיה ניתן לזהות אותו בקלות."
-         )
-
+            "בחר את המומלץ ביותר והסבר למה. הקף את שם המסלול המומלץ במרכאות כפולות \"\"."
+        )
 
         final_response = client.chat.completions.create(
             model=MODEL,
@@ -153,47 +137,38 @@ async def ask_route(request: Request):
 
         return {"response": str(final_response)}
 
-    else:
-        trip_details = client.chat.completions.create(
-            model=MODEL,
-            messages=[
-                {
-                    "role": "system",
-                    "content": (
-                        "אתה מדריך טיולים מומחה בישראל. "
-                        "המטרה היא לחלץ מהשאלה של המשתמש שלושה פרמטרים: "
-                        "אזור בארץ (region), רמת קושי (difficulty), והאם יש מים במסלול (has_water). "
-                        "אם לא נאמר מספיק מידע, אבל מדובר בתחום הטיולים – קבע related=True, אבל השאר את הערכים ריקים. "
-                        "אם זו לא שאלה שקשורה בכלל לטיולים – קבע related=False בלבד."
-                    )
-                },
-                {"role": "user", "content": user_question}
-            ],
-            response_model=TripDetails
-        )
+    trip_details = client.chat.completions.create(
+        model=MODEL,
+        messages=[
+            {"role": "system", "content": (
+                "אתה מדריך טיולים מומחה בישראל. המטרה היא לחלץ מהשאלה של המשתמש שלושה פרמטרים: אזור בארץ (region), רמת קושי (difficulty), והאם יש מים במסלול (has_water). אם לא נאמר מספיק מידע, אבל מדובר בתחום הטיולים – קבע related=True, אבל השאר את הערכים ריקים. אם זו לא שאלה שקשורה בכלל לטיולים – קבע related=False בלבד."
+            )},
+            {"role": "user", "content": user_question}
+        ],
+        response_model=TripDetails
+    )
 
-        if not trip_details.related:
-            return {"response": "אני כאן כדי לעזור רק בטיולים 🙂 נסה לשאול על מסלול, אזור בארץ, מים או רמת קושי."}
+    if not trip_details.related:
+        return {"response": "אני כאן כדי לעזור רק בטיולים 🙂 נסה לשאול על מסלול, אזור בארץ, מים או רמת קושי."}
 
-        filled_fields = sum([
-            bool(trip_details.region),
-            bool(trip_details.difficulty),
-            isinstance(trip_details.has_water, bool)
-        ])
+    filled_fields = sum([
+        bool(trip_details.region),
+        bool(trip_details.difficulty),
+        isinstance(trip_details.has_water, bool)
+    ])
 
-        if filled_fields < 2:
-            return {"response": "כדי שאוכל להמליץ לך על מסלול מתאים, נסה לציין לפחות שני פרטים – אזור, רמת קושי או אם יש מים 🌊"}
+    if filled_fields < 2:
+        return {"response": "כדי שאוכל להמליץ לך על מסלול מתאים, נסה לציין לפחות שני פרטים – אזור, רמת קושי או אם יש מים 🌊"}
 
-        return {
-            "response": "רק שאלה אחרונה 🙂 האם חשוב לך שהמסלול יהיה נגיש לנכים? ומה האורך המקסימלי שתרצה?",
-            "context": {
-                "followup_required": True,
-                "user_question": user_question,
-                "region": trip_details.region,
-                "difficulty": trip_details.difficulty,
-                "has_water": trip_details.has_water
-            }
+    return {
+        "response": "רק שאלה אחרונה 🙂 האם חשוב לך שהמסלול יהיה נגיש לנכים?",
+        "context": {
+            "followup_required": True,
+            "region": trip_details.region,
+            "difficulty": trip_details.difficulty,
+            "has_water": trip_details.has_water
         }
+    }
 
 @app.post("/similar")
 async def get_similar_routes(request: Request):
@@ -212,11 +187,11 @@ async def get_similar_routes(request: Request):
     similar_routes = similar_routes[similar_routes["name"] != closest].head(5)
 
     if similar_routes.empty:
-        return {"response": f"לא מצאתי מסלולים דומים ל־{closest} 😕"}
+        return {"response": f"לא מצאתי מסלולים דומים ל‎{closest} 😕"}
 
     suggestions = "\n".join([
-        f"{row['name']} – {row['תיאור קצר']} ({row['region']}, {row['difficulty']})"
+        f'{row["name"]} – {row["תיאור קצר"]} ({row["region"]}, {row["difficulty"]})'
         for _, row in similar_routes.iterrows()
     ])
 
-    return {"response": f"הנה מסלולים דומים ל־{closest}:\n{suggestions}"}
+    return {"response": f"הנה מסלולים דומים ל‎{closest}:\n{suggestions}"}
