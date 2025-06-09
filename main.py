@@ -50,34 +50,18 @@ except Exception as e:
     print(f"⚠️ שגיאה ב-Clustering: {e}")
 
 class TripDetails(BaseModel):
-    related: bool = Field(description="האם השאלה רלוונטית לטיולים?")
-    region: str = Field(description="האזור בארץ. אחד מ: צפון,דרום,מרכז")
-    difficulty: str = Field(description="קושי. אחד מ: קל,בינוני,קשה")
+    related: bool
+    region: str
+    difficulty: str
     has_water: bool
 
 class AccessibilityOnly(BaseModel):
     wants_accessibility: bool
 
-def levenshtein_distance(s1, s2):
-    if len(s1) < len(s2):
-        return levenshtein_distance(s2, s1)
-    if len(s2) == 0:
-        return len(s1)
-    previous_row = range(len(s2) + 1)
-    for i, c1 in enumerate(s1):
-        current_row = [i + 1]
-        for j, c2 in enumerate(s2):
-            insertions = previous_row[j + 1] + 1
-            deletions = current_row[j] + 1
-            substitutions = previous_row[j] + (c1 != c2)
-            current_row.append(min(insertions, deletions, substitutions))
-        previous_row = current_row
-    return previous_row[-1]
-
 def is_similar_to_greeting(text):
     greetings = ["שלום", "היי", "הי", "אהלן", "מה נשמע", "מה שלומך", "מה קורה", "בוקר טוב", "ערב טוב"]
     text = text.replace("?", "").replace(",", "").replace("!", "").strip().lower()
-    return any(levenshtein_distance(text, greet) <= 1 for greet in greetings)
+    return any(text.startswith(greet) for greet in greetings)
 
 @app.post("/ask")
 async def ask_route(request: Request):
@@ -86,8 +70,9 @@ async def ask_route(request: Request):
     context = data.get("context", {})
 
     if is_similar_to_greeting(user_question):
-        return {"response": "שלום! אני כאן כדי לעזור לך למצוא מסלולי טיול בישראל 🎕️ שאל אותי על אזור, קושי, מים או כל דבר שקשור לטיולים."}
+        return {"response": "שלום! אני כאן כדי לעזור לך למצוא מסלולי טיול בישראל 🇱🇷 שאל אותי על אזור, קושי, מים או כל דבר שקשור לטיולים."}
 
+    # שלב מעקב
     if context.get("followup_required"):
         followup_answer = client.chat.completions.create(
             model=MODEL,
@@ -120,7 +105,6 @@ async def ask_route(request: Request):
             for _, row in filtered.head(3).iterrows()
         ])
 
-        # בחר אחד והקף אותו במרכאות כדי לאפשר הצגת כפתור דמיון
         final_prompt = (
             f"המשתמש מחפש מסלול. הנה כמה הצעות:\n{suggestions}\n"
             "בחר את המומלץ ביותר והסבר למה. הקף את שם המסלול המומלץ במרכאות כפולות \"\"."
@@ -137,11 +121,15 @@ async def ask_route(request: Request):
 
         return {"response": str(final_response)}
 
+    # שלב ניתוח ראשוני
     trip_details = client.chat.completions.create(
         model=MODEL,
         messages=[
             {"role": "system", "content": (
-                "אתה מדריך טיולים מומחה בישראל. המטרה היא לחלץ מהשאלה של המשתמש שלושה פרמטרים: אזור בארץ (region), רמת קושי (difficulty), והאם יש מים במסלול (has_water). אם לא נאמר מספיק מידע, אבל מדובר בתחום הטיולים – קבע related=True, אבל השאר את הערכים ריקים. אם זו לא שאלה שקשורה בכלל לטיולים – קבע related=False בלבד."
+                "אתה מדריך טיולים מומחה בישראל. המטרה היא לחלץ מהשאלה של המשתמש שלושה פרמטרים: אזור בארץ (region), רמת קושי (difficulty), והאם יש מים במסלול (has_water).\n"
+                "אם לא נאמר מספיק מידע, אבל מדובר בתחום הטיולים – קבע related=True, אבל השאר את הערכים ריקים.\n"
+                "אם זו לא שאלה שקשורה בכלל לטיולים – קבע related=False בלבד.\n"
+                "אם יש סתירה בדרישות (כגון חוף בירושלים, או שלג בים המלח) – החזר related=False בלבד."
             )},
             {"role": "user", "content": user_question}
         ],
@@ -149,11 +137,11 @@ async def ask_route(request: Request):
     )
 
     if not trip_details.related:
-        return {"response": "אני כאן כדי לעזור רק בטיולים 🙂 נסה לשאול על מסלול, אזור בארץ, מים או רמת קושי."}
+        return {"response": "הבקשה שלך לא נראית הגיונית – נסה ניסוח אחר או אזור שונה 🙂"}
 
     filled_fields = sum([
-        bool(trip_details.region),
-        bool(trip_details.difficulty),
+        bool(trip_details.region.strip()) if trip_details.region else False,
+        bool(trip_details.difficulty.strip()) if trip_details.difficulty else False,
         isinstance(trip_details.has_water, bool)
     ])
 
