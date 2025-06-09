@@ -70,7 +70,7 @@ async def ask_route(request: Request):
     context = data.get("context", {})
 
     if is_similar_to_greeting(user_question):
-        return {"response": "שלום! אני כאן כדי לעזור לך למצוא מסלולי טיול בישראל 🇱🇷 שאל אותי על אזור, קושי, מים או כל דבר שקשור לטיולים."}
+        return {"response": "שלום! אני כאן כדי לעזור לך למצוא מסלולי טיול בישראל ! שאל אותי על אזור, קושי, מים או כל דבר שקשור לטיולים."}
 
     # שלב מעקב
     if context.get("followup_required"):
