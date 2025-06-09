@@ -63,6 +63,9 @@ def is_similar_to_greeting(text):
     text = text.replace("?", "").replace(",", "").replace("!", "").strip().lower()
     return any(text.startswith(greet) for greet in greetings)
 
+def is_filled(val):
+    return bool(val and str(val).strip() and str(val).lower() not in ["", "לא ידוע", "unknown", "none"])
+
 @app.post("/ask")
 async def ask_route(request: Request):
     data = await request.json()
@@ -140,8 +143,8 @@ async def ask_route(request: Request):
         return {"response": "הבקשה שלך לא נראית הגיונית – נסה ניסוח אחר או אזור שונה 🙂"}
 
     filled_fields = sum([
-        bool(trip_details.region.strip()) if trip_details.region else False,
-        bool(trip_details.difficulty.strip()) if trip_details.difficulty else False,
+        is_filled(trip_details.region),
+        is_filled(trip_details.difficulty),
         isinstance(trip_details.has_water, bool)
     ])
 
