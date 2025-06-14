@@ -30,7 +30,6 @@ try:
     df = pd.read_excel("data.xlsx")
 except Exception as e:
     df = pd.DataFrame()
-    print(f"⚠️ לא נטען קובץ הנתונים: {e}")
 
 # Clustering על המסלולים
 try:
@@ -47,7 +46,7 @@ try:
     kmeans = KMeans(n_clusters=4, random_state=42)
     df_clustering["cluster"] = kmeans.fit_predict(X)
 except Exception as e:
-    print(f"⚠️ שגיאה ב-Clustering: {e}")
+    pass
 
 class TripDetails(BaseModel):
     related: bool
@@ -62,9 +61,6 @@ def is_similar_to_greeting(text):
     greetings = ["שלום", "היי", "הי", "אהלן", "מה נשמע", "מה שלומך", "מה קורה", "בוקר טוב", "ערב טוב"]
     text = text.replace("?", "").replace(",", "").replace("!", "").strip().lower()
     return any(text.startswith(greet) for greet in greetings)
-
-def is_filled(val):
-    return bool(val and str(val).strip() and str(val).lower() not in ["", "לא ידוע", "unknown", "none"])
 
 @app.post("/ask")
 async def ask_route(request: Request):
@@ -143,9 +139,9 @@ async def ask_route(request: Request):
         return {"response": "הבקשה שלך לא נראית הגיונית – נסה ניסוח אחר או אזור שונה 🙂"}
 
     filled_fields = sum([
-        is_filled(trip_details.region),
-        is_filled(trip_details.difficulty),
-        isinstance(trip_details.has_water, bool)
+        bool(trip_details.region.strip()) if trip_details.region else False,
+        bool(trip_details.difficulty.strip()) if trip_details.difficulty else False,
+        trip_details.has_water in [True, False]
     ])
 
     if filled_fields < 2:
