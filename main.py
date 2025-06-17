@@ -3,12 +3,13 @@ from fastapi.middleware.cors import CORSMiddleware
 import pandas as pd
 import os
 from dotenv import load_dotenv
-from pydantic import BaseModel, Field
+from pydantic import BaseModel
 from openai import OpenAI
 from difflib import get_close_matches
 import instructor
 from sklearn.cluster import KMeans
 from sklearn.preprocessing import LabelEncoder
+from urllib.parse import quote
 
 load_dotenv()
 
@@ -25,13 +26,11 @@ app.add_middleware(
 client = instructor.from_openai(OpenAI(api_key=os.getenv("OPENAI_API_KEY")))
 MODEL = "gpt-4o-mini"
 
-# טען את הקובץ
 try:
     df = pd.read_excel("data.xlsx")
-except Exception as e:
+except Exception:
     df = pd.DataFrame()
 
-# Clustering על המסלולים
 try:
     df_clustering = df.copy()
     label_cols = ["region", "difficulty", "נגישות"]
@@ -45,14 +44,17 @@ try:
     X = df_clustering[features]
     kmeans = KMeans(n_clusters=4, random_state=42)
     df_clustering["cluster"] = kmeans.fit_predict(X)
-except Exception as e:
+except Exception:
     pass
+
+def create_gmaps_link(name):
+    return f"https://www.google.com/maps/search/{quote(name)}"
 
 class TripDetails(BaseModel):
     related: bool
-    region: str
-    difficulty: str
-    has_water: bool
+    region: str = ""
+    difficulty: str = ""
+    has_water: bool | None = None
 
 class AccessibilityOnly(BaseModel):
     wants_accessibility: bool
@@ -69,11 +71,40 @@ async def ask_route(request: Request):
     context = data.get("context", {})
 
     if is_similar_to_greeting(user_question):
-        return {"response": "שלום! אני כאן כדי לעזור לך למצוא מסלולי טיול בישראל ! שאל אותי על אזור, קושי, מים או כל דבר שקשור לטיולים."}
+        return {"response": "שלום! אני כאן כדי לעזור לך למצוא מסלולי טיול בישראל! שאל אותי על אזור, קושי, מים או כל דבר שקשור לטיולים."}
 
-    # שלב מעקב
-    if context.get("followup_required"):
-        followup_answer = client.chat.completions.create(
+    region = context.get("region")
+    difficulty = context.get("difficulty")
+    has_water = context.get("has_water")
+    step = context.get("step")
+
+    # שלב הניתוח לחילוץ פרמטרים
+    trip_details = client.chat.completions.create(
+        model=MODEL,
+        messages=[
+            {"role": "system", "content": (
+                "אתה מדריך טיולים בישראל. נתח את ההודעה וחלץ אם מדובר באזור (region), קושי (difficulty) או מים (has_water)."
+                " החזר רק את מה שמופיע. אל תנחש את החסר. אל תשלים מידע לבד."
+            )},
+            {"role": "user", "content": user_question}
+        ],
+        response_model=TripDetails
+    )
+
+    region = region or trip_details.region
+    difficulty = difficulty or trip_details.difficulty
+    has_water = has_water if has_water in [True, False] else trip_details.has_water
+
+    if not region:
+        return {"response": "באיזה אזור בארץ תרצה לטייל?", "context": {"region": "", "difficulty": difficulty, "has_water": has_water, "step": "awaiting_region"}}
+    if has_water is None:
+        return {"response": "האם חשוב לך שיהיו מים במסלול?", "context": {"region": region, "difficulty": difficulty, "has_water": None, "step": "awaiting_water"}}
+    if not difficulty:
+        return {"response": "איזה דרגת קושי תעדיף? קל, בינוני או קשה?", "context": {"region": region, "difficulty": "", "has_water": has_water, "step": "awaiting_difficulty"}}
+
+    # אם יש followup נמשיך לשלב הנגישות
+    if context.get("followup_required") or context.get("step") == "awaiting_accessibility":
+        accessibility_response = client.chat.completions.create(
             model=MODEL,
             messages=[
                 {"role": "system", "content": "משתמש נשאל האם חשובה לו נגישות לנכים. החזר JSON עם שדה wants_accessibility בלבד."},
@@ -82,10 +113,9 @@ async def ask_route(request: Request):
             response_model=AccessibilityOnly
         )
 
-        region = context.get("region")
-        difficulty = context.get("difficulty")
-        has_water = context.get("has_water")
+        wants_accessibility = accessibility_response.wants_accessibility
 
+        # סינון המסלולים
         filtered = df.copy()
         if region:
             filtered = filtered[filtered["region"] == region]
@@ -93,7 +123,7 @@ async def ask_route(request: Request):
             filtered = filtered[filtered["has_water"] == has_water]
         if difficulty:
             filtered = filtered[filtered["difficulty"] == difficulty]
-        if followup_answer.wants_accessibility:
+        if wants_accessibility:
             filtered = filtered[filtered["נגישות"].astype(str).str.contains("נגיש", na=False)]
 
         if filtered.empty:
@@ -106,7 +136,9 @@ async def ask_route(request: Request):
 
         final_prompt = (
             f"המשתמש מחפש מסלול. הנה כמה הצעות:\n{suggestions}\n"
-            "בחר את המומלץ ביותר והסבר למה. הקף את שם המסלול המומלץ במרכאות כפולות \"\"."
+            "בחר את המסלול המומלץ ביותר.\n"
+            "שלב 1: כתוב את שם המסלול במרכאות כפולות \"\" בלבד, בשורה הראשונה, בלי הסבר נוסף.\n"
+            "שלב 2: לאחר מכן, הסבר מדוע בחרת בו."
         )
 
         final_response = client.chat.completions.create(
@@ -120,40 +152,15 @@ async def ask_route(request: Request):
 
         return {"response": str(final_response)}
 
-    # שלב ניתוח ראשוני
-    trip_details = client.chat.completions.create(
-        model=MODEL,
-        messages=[
-            {"role": "system", "content": (
-                "אתה מדריך טיולים מומחה בישראל. המטרה היא לחלץ מהשאלה של המשתמש שלושה פרמטרים: אזור בארץ (region), רמת קושי (difficulty), והאם יש מים במסלול (has_water).\n"
-                "אם לא נאמר מספיק מידע, אבל מדובר בתחום הטיולים – קבע related=True, אבל השאר את הערכים ריקים.\n"
-                "אם זו לא שאלה שקשורה בכלל לטיולים – קבע related=False בלבד.\n"
-                "אם יש סתירה בדרישות (כגון חוף בירושלים, או שלג בים המלח) – החזר related=False בלבד."
-            )},
-            {"role": "user", "content": user_question}
-        ],
-        response_model=TripDetails
-    )
-
-    if not trip_details.related:
-        return {"response": "הבקשה שלך לא נראית הגיונית – נסה ניסוח אחר או אזור שונה 🙂"}
-
-    filled_fields = sum([
-        bool(trip_details.region.strip()) if trip_details.region else False,
-        bool(trip_details.difficulty.strip()) if trip_details.difficulty else False,
-        trip_details.has_water in [True, False]
-    ])
-
-    if filled_fields < 2:
-        return {"response": "כדי שאוכל להמליץ לך על מסלול מתאים, נסה לציין לפחות שני פרטים – אזור, רמת קושי או אם יש מים 🌊"}
-
+    # אם עדיין לא שאלה על נגישות – נבקש אותה
     return {
         "response": "רק שאלה אחרונה 🙂 האם חשוב לך שהמסלול יהיה נגיש לנכים?",
         "context": {
             "followup_required": True,
-            "region": trip_details.region,
-            "difficulty": trip_details.difficulty,
-            "has_water": trip_details.has_water
+            "region": region,
+            "difficulty": difficulty,
+            "has_water": has_water,
+            "step": "awaiting_accessibility"
         }
     }
 
