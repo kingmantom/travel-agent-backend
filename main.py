@@ -5,7 +5,7 @@ import os
 from dotenv import load_dotenv
 from pydantic import BaseModel
 from openai import OpenAI
-from difflib import get_close_matches
+from difflib import get_close_matches, SequenceMatcher
 import instructor
 from sklearn.cluster import KMeans
 from sklearn.preprocessing import LabelEncoder
@@ -59,10 +59,17 @@ class TripDetails(BaseModel):
 class AccessibilityOnly(BaseModel):
     wants_accessibility: bool
 
+class TopicClassifier(BaseModel):
+    related_to_travel: bool
+
 def is_similar_to_greeting(text):
     greetings = ["שלום", "היי", "הי", "אהלן", "מה נשמע", "מה שלומך", "מה קורה", "בוקר טוב", "ערב טוב"]
     text = text.replace("?", "").replace(",", "").replace("!", "").strip().lower()
-    return any(text.startswith(greet) for greet in greetings)
+
+    def similarity(a, b):
+        return SequenceMatcher(None, a, b).ratio()
+
+    return any(similarity(text, greet) >= 0.5 for greet in greetings)
 
 @app.post("/ask")
 async def ask_route(request: Request):
@@ -78,7 +85,6 @@ async def ask_route(request: Request):
     has_water = context.get("has_water")
     step = context.get("step")
 
-    # שלב הניתוח לחילוץ פרמטרים
     trip_details = client.chat.completions.create(
         model=MODEL,
         messages=[
@@ -95,15 +101,7 @@ async def ask_route(request: Request):
     difficulty = difficulty or trip_details.difficulty
     has_water = has_water if has_water in [True, False] else trip_details.has_water
 
-    if not region:
-        return {"response": "באיזה אזור בארץ תרצה לטייל?", "context": {"region": "", "difficulty": difficulty, "has_water": has_water, "step": "awaiting_region"}}
-    if has_water is None:
-        return {"response": "האם חשוב לך שיהיו מים במסלול?", "context": {"region": region, "difficulty": difficulty, "has_water": None, "step": "awaiting_water"}}
-    if not difficulty:
-        return {"response": "איזה דרגת קושי תעדיף? קל, בינוני או קשה?", "context": {"region": region, "difficulty": "", "has_water": has_water, "step": "awaiting_difficulty"}}
-
-    # אם יש followup נמשיך לשלב הנגישות
-    if context.get("followup_required") or context.get("step") == "awaiting_accessibility":
+    if context.get("followup_required") or step == "awaiting_accessibility":
         accessibility_response = client.chat.completions.create(
             model=MODEL,
             messages=[
@@ -115,7 +113,6 @@ async def ask_route(request: Request):
 
         wants_accessibility = accessibility_response.wants_accessibility
 
-        # סינון המסלולים
         filtered = df.copy()
         if region:
             filtered = filtered[filtered["region"] == region]
@@ -152,7 +149,28 @@ async def ask_route(request: Request):
 
         return {"response": str(final_response)}
 
-    # אם עדיין לא שאלה על נגישות – נבקש אותה
+    if not context.get("followup_required") and step not in ["awaiting_region", "awaiting_water", "awaiting_difficulty"]:
+        classification = client.chat.completions.create(
+            model=MODEL,
+            messages=[
+                {"role": "system", "content": "בדוק אם ההודעה של המשתמש קשורה לטיולים בישראל. החזר רק true אם כן, אחרת false."},
+                {"role": "user", "content": user_question}
+            ],
+            response_model=TopicClassifier
+        )
+
+        if not classification.related_to_travel:
+            return {
+                "response": "נראה שהשאלה לא קשורה לטיולים 🤭 אני כאן כדי לעזור לך למצוא מסלולים לטיול בישראל. שאל אותי על אזור, קושי, מים או כל דבר שקשור לטיולים."
+            }
+
+    if not region:
+        return {"response": "באיזה אזור בארץ תרצה לטייל?", "context": {"region": "", "difficulty": difficulty, "has_water": has_water, "step": "awaiting_region"}}
+    if has_water is None:
+        return {"response": "האם חשוב לך שיהיו מים במסלול?", "context": {"region": region, "difficulty": difficulty, "has_water": None, "step": "awaiting_water"}}
+    if not difficulty:
+        return {"response": "איזה דרגת קושי תעדיף? קל, בינוני או קשה?", "context": {"region": region, "difficulty": "", "has_water": has_water, "step": "awaiting_difficulty"}}
+
     return {
         "response": "רק שאלה אחרונה 🙂 האם חשוב לך שהמסלול יהיה נגיש לנכים?",
         "context": {
